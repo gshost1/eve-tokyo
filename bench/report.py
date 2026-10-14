@@ -16,7 +16,8 @@ costs = defaultdict(list)
 caps_before = defaultdict(list)
 for r in d["results"]:
     summaries = [x for x in r["rounds"] if x["path"] == "summary"]
-    caps_before[r["strategy"]].append(len(r["rounds"]) - len(summaries))
+    first = next((i for i, x in enumerate(r["rounds"]) if x["path"] == "summary"), len(r["rounds"]))
+    caps_before[r["strategy"]].append(first)
     for i, x in enumerate(summaries, 1):
         row = {k: x["byKind"][k]["present"] / max(1, x["byKind"][k]["total"]) for k in KINDS}
         dl = x["decisionLoose"]
