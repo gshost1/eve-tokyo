@@ -76,7 +76,60 @@ Measure eve's summary-of-a-summary loop over 1, 2, 3, 5 compactions with Nous's 
 method (credited), score by detail type, and test an exact-identifier index as the fix.
 Cite Nous for Jev instead of re-running it as the headline.
 
-### Not confirmed
+## eve compaction engine (read at vercel/eve 0fd4240, 2026-10-13)
+
+Files: `packages/eve/src/harness/compaction/engine.ts`, `prompt.ts`.
+
+1. Trigger: last provider-reported input tokens + estimate of newer messages + prompt
+   envelope > threshold (default 90% of window). `engine.ts:66`
+2. Cap pass, no model: every older tool result whose JSON exceeds 2,000 chars becomes
+   annotation + the **first** 2,000 chars of that JSON. Previous checkpoint carried over
+   unchanged. If under threshold, done, no summary. `engine.ts:121`, `:270`
+3. Summary fallback: older region + previous checkpoint (never truncated) → "Update the
+   previous checkpoint". Prompt asks to preserve exact file paths, function names, commands,
+   error messages, identifiers. That promise is the scoring target. `prompt.ts:22`
+4. Still over: keep recent tail verbatim → strip it to text → shrink window by one. `engine.ts:215`
+5. Over-budget transcript: oldest text capped to 2,000 chars, tool payloads to 280. `prompt.ts:85`
+6. `CompactionHeuristic` is sync; `COMPACTION_HEURISTICS = [toolResultCapHeuristic]`. `engine.ts:105`, `:113`
+
+### Bug: capped tool results are re-capped every compaction (confirmed)
+
+`capToolResults` has no already-capped check. A capped result's JSON (annotation + escaped
+payload) is over 2,000 chars again, so each later compaction wraps and re-escapes it.
+
+Repro: [`probes/recap.probe.test.ts`](probes/recap.probe.test.ts), run against eve's real engine
+(passes; eve's own 44 engine tests still pass). 4 compactions, cap path only (summarizer throws
+if called, never called), a 400-path grep result ending in a FAIL line:
+
+| Round | Annotations | Backslashes | Module paths kept (of 400) | FAIL line kept |
+|---|---|---|---|---|
+| 1 | 1 | 180 | 60 | no |
+| 2 | 2 | 393 | 48 | no |
+| 3 | 3 | 663 | 35 | no |
+| 4 | 4 | 917 | 22 | no |
+
+- Length stays 2,113 chars; real content is displaced by stacked annotations and backslashes.
+- Bites while compactions keep taking the cap path. Once the summary path runs, those older
+  messages are folded into the checkpoint and the chain ends.
+- Head-only cap: tail content (test failures, compiler errors, stack traces) is lost in round 1.
+- Fix: skip results whose value already starts with the annotation (`engine.ts:270`).
+  Separately, keep head + tail.
+- No existing report found on vercel/eve (searched issues and PRs). Nearest: #1040 (different change).
+
+Run it (eve clone, Node 24, pnpm):
+
+```bash
+pnpm install --frozen-lockfile --ignore-scripts --filter eve...
+cp probes/recap.probe.test.ts <eve>/packages/eve/src/harness/compaction/
+cd <eve>/packages/eve && npx vitest run --config vitest.unit.config.ts --silent=false src/harness/compaction/recap.probe.test.ts
+```
+
+### Benchmark implications
+
+- Log per round whether the cap path or summary path ran; they drift differently.
+- Score head-of-output vs tail-of-output errors separately.
+
+### Not confirmed (prior-art sweep)
 
 - Read only the abstract of The Compaction Cliff and the forum post for the HF preprint.
 - Read only the Nous README and the two scorecards, not runner code or the Codex head-to-head in full.
