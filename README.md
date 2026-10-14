@@ -14,12 +14,14 @@ alongside context reduction, cost and latency.
 
 **The biggest easy win: keep the end of each trimmed tool output, not just the start.**
 Every build and test run in these sessions failed, and the failure was always at the end of
-the output. Keeping only the start, the summary described a failing build as passing in 7 of 30
-checkpoints ("`tsc` compile ran cleanly (empty stderr)"). Keeping the start and the end: 0 of 30.
+the output. When compaction kept only the start, summaries described a failing build or test as
+passing in **72 of 180** checkpoints (40%) across six summarizer models
+("every vitest run showed all specs passing"). When it kept the start and the end: **0 of 180**.
 
 Measured against eve at [`0fd4240`](https://github.com/vercel/eve/commit/0fd4240d31c0fdf18e61dfdedf3c203eb595bba2)
-(eve 0.79.0), 3 synthetic sessions, summarizer `anthropic/claude-haiku-5.5` via Vercel AI Gateway.
-60 summary calls, about $0.80 in total.
+(eve 0.79.0), 3 synthetic sessions, six summarizers: `anthropic/claude-haiku-5.5`,
+`openai/gpt-6-luna-fast` and `google/gemini-3.8-flash` via Vercel AI Gateway, and
+`deepseek-v4.1-flash`, `qwen3.8-max` and `kimi-k2.6` via DigitalOcean inference.
 
 ### Contributed upstream
 
@@ -51,8 +53,8 @@ longer before a summary is needed: 8–12 rounds instead of 5–6.
 ### Summary path (summary of a summary)
 
 Share of every exact detail introduced so far that is still in context, mean of 3 seeds,
-after the 1st and 5th summary. "Decisions" counts a paraphrase that keeps the chosen option,
-the rejected one and the area in one sentence.
+after the 1st and 5th summary, with `anthropic/claude-haiku-5.5`. "Decisions" counts a
+paraphrase that keeps the chosen option, the rejected one and the area in one sentence.
 
 | Strategy | Paths | Errors | Commands | Decisions |
 |---|---|---|---|---|
@@ -62,24 +64,41 @@ the rejected one and the area in one sentence.
 | head + tail + identifier index | 11% → 9% | 11% → 2% | 12% → 3% | 67% → 76% |
 
 - Summaries keep the meaning well (decisions survive as paraphrase) but drop exact strings:
-  after one summary ~5% of exact error strings remain, after five ~1%. That's expected of any
-  summarizer, and it's what an exact-reference list is for.
-- The identifier index holds steady across rounds (paths 9–11% at every round), limited mainly by
-  its 6,000-char budget.
-- Per summary: $0.012–0.015, 18–34 s, ~93–96K input tokens. eve budgets the summary prompt at
-  the 60K threshold using a chars/4 estimate; real input was ~1.55× that on this content.
+  after one summary ~5% of exact error strings remain, after five ~1%, on every model tested.
+  That's expected of any summarizer, and it's what an exact-reference list is for.
+- On Haiku the identifier index holds steady across rounds (paths 9–11% at every round),
+  limited mainly by its 6,000-char budget. On the other models its effect was mixed.
+- Per Haiku summary: $0.012–0.015, 18–34 s, ~93–96K input tokens. eve budgets the summary
+  prompt at the 60K threshold using a chars/4 estimate; real input was ~1.55× that on this content.
 
-Per-round tables: `python3 bench/report.py results/model-haiku.json --md`.
+### Across models
+
+Checkpoints that claim a failing build or test went fine, out of 15 per cell (3 seeds × 5 summaries):
+
+| Summarizer | eve default | #4771 fix | head + tail | head + tail + index |
+|---|---|---|---|---|
+| anthropic/claude-haiku-5.5 | 3 | 4 | 0 | 0 |
+| openai/gpt-6-luna-fast | 1 | 1 | 0 | 0 |
+| google/gemini-3.8-flash | 0 | 1 | 0 | 0 |
+| deepseek-v4.1-flash | 15 | 13 | 0 | 0 |
+| qwen3.8-max | 10 | 11 | 0 | 0 |
+| kimi-k2.6 | 8 | 5 | 0 | 0 |
+
+Frontier models mostly hedge when the end of a result is missing; the open-weight models fill
+the gap with "passed". Keeping the end removes the question for every model.
+`glm-5.3` and `gemma-4-31B-it` were also tried and didn't finish within the 1-hour run limit.
+Full table: `python3 bench/compare.py results/model-haiku.json results/gw-full-*.json results/do-full-*.json --md`.
 
 ### Caveats
 
-- 3 seeds, and the gateway ignores `temperature` for Haiku 5.5, so summaries vary run to run.
+- 3 seeds per model, and the gateway ignores `temperature` for Haiku 5.5, so summaries vary run to run.
   Read the tables as direction, not precision; the middle rows move between rounds.
 - Sessions are synthetic. Errors are planted at the end of outputs (as with real test and build
   runs), which favours a head + tail cap by construction.
 - Retention is exact substring match over the whole kept context, against every detail ever
   introduced, so long sessions score low by design.
-- False-success claims were counted with a regex over the checkpoint texts.
+- False-success claims were counted with a line-level regex over the checkpoint texts (negations
+  and lines that also mention a failure are excluded); flagged lines were spot-checked by hand.
 
 ## Strategies
 
@@ -106,8 +125,9 @@ python3 ../../../../bench/summarize.py offline.json
 
 Layers: `offline` (cap path only, stops when a summary would be needed), `null-summary`
 (a summarizer that keeps nothing, free), `model` (real summarizer; needs `AI_GATEWAY_API_KEY`,
-`BENCH_MODEL` defaults to `anthropic/claude-haiku-5.5`). Other knobs: `BENCH_SEEDS`,
-`BENCH_TURNS`, `BENCH_SUMMARY_ROUNDS`, `BENCH_MAX_ROUNDS`, `BENCH_STRATEGIES`, `BENCH_THRESHOLD`.
+`BENCH_MODEL` defaults to `anthropic/claude-haiku-5.5`), `do` (DigitalOcean inference; needs
+`DO_KEY`). `bench/run-gw.sh` and `bench/run-do-par.sh` run several models. Other knobs: `BENCH_SEEDS`,
+`BENCH_TURNS`, `BENCH_SUMMARY_ROUNDS`, `BENCH_MAX_ROUNDS`, `BENCH_STRATEGIES`, `BENCH_THRESHOLD`, `BENCH_CONCURRENCY`.
 
 ## Credits
 

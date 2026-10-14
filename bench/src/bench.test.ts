@@ -48,17 +48,35 @@ it(
         ? offlineSummarizer
         : layer === "null-summary"
           ? nullSummarizer
-          : (await import("./gateway.js")).gatewaySummarizer();
-    const jobs = seeds.flatMap((seed) =>
+          : layer === "do"
+            ? (await import("./digitalocean.js")).digitalOceanSummarizer()
+            : (await import("./gateway.js")).gatewaySummarizer();
+    const tasks = seeds.flatMap((seed) =>
       Object.entries(STRATEGIES)
         .filter(([strategy]) => !only || only.includes(strategy))
-        .map(async ([strategy, engine]) => {
+        .map(([strategy, engine]) => async () => {
           const session = generateSession(seed, turns);
           const run = await replay(session, engine, config, summarizer, { maxRounds, maxSummaryRounds, stopAtSummary: layer === "offline" });
           return { seed, session: session.name, strategy, ...run };
         }),
     );
-    const results = await Promise.all(jobs);
+    // Some providers drop connections under many parallel requests; BENCH_CONCURRENCY caps it.
+    const limit = Number(process.env.BENCH_CONCURRENCY ?? tasks.length);
+    const results: Awaited<ReturnType<(typeof tasks)[number]>>[] = new Array(tasks.length);
+    let next = 0;
+    await Promise.all(
+      Array.from({ length: Math.min(limit, tasks.length) }, async () => {
+        while (next < tasks.length) {
+          const i = next++;
+          try {
+            results[i] = await tasks[i]!();
+          } catch (error) {
+            // Keep the other sessions' results; record what failed.
+            results[i] = { error: String(error).slice(0, 500), rounds: [], seed: -1, session: "", strategy: `task-${i}` } as never;
+          }
+        }
+      }),
+    );
     writeFileSync(out, JSON.stringify({ config, layer, maxRounds, maxSummaryRounds, model: process.env.BENCH_MODEL, results, seeds, turns }, null, 1));
   },
   60 * 60 * 1000,
