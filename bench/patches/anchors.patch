@@ -1,0 +1,136 @@
+--- a/engine.ts	2026-10-13 22:31:31
++++ b/engine.ts	2026-10-13 22:35:09
+@@ -5,7 +5,7 @@
+   COMPACTION_PROMPT_ENVELOPE,
+   COMPACTION_RESUMPTION_MESSAGE,
+   createCompactionPrompt,
+-  sliceUtf16Safe,
++  headTailSlice,
+   stubContentOutputFileParts,
+   TRANSCRIPT_PAYLOAD_LIMIT,
+ } from "#harness/compaction/prompt.js";
+@@ -228,7 +228,7 @@
+ 
+     const summaryHead: ModelMessage[] = [
+       createFrameworkUserMessage("context.compaction", COMPACTION_CHECKPOINT_MARKER),
+-      { content: summary, role: "assistant" },
++      { content: withAnchorIndex(summary, previousCheckpoint, older), role: "assistant" },
+     ];
+ 
+     // Prefer keeping the recent tail verbatim — surviving tool results are the
+@@ -281,6 +281,10 @@
+       // File parts of a content output reduce to their text stubs before the
+       // size check: serializing raw payloads into a prefix cap would keep
+       // bytes the model cannot read while cutting the text it can.
++      // eve-tokyo fix4771: an already-capped output is left alone.
++      if (part.output.type === "text" && part.output.value.startsWith(CAPPED_RESULT_ANNOTATION)) {
++        return part;
++      }
+       const output = stubContentOutputFileParts(part.output) as typeof part.output;
+       const serialized = JSON.stringify(output) ?? "";
+       if (serialized.length <= TRANSCRIPT_PAYLOAD_LIMIT) {
+@@ -296,7 +300,7 @@
+         ...part,
+         output: {
+           type: "text" as const,
+-          value: `${CAPPED_RESULT_ANNOTATION}\n\n${sliceUtf16Safe(serialized, TRANSCRIPT_PAYLOAD_LIMIT)}`,
++          value: `${CAPPED_RESULT_ANNOTATION}\n\n${headTailSlice(serialized, TRANSCRIPT_PAYLOAD_LIMIT)}`,
+         },
+       };
+     });
+@@ -493,4 +497,66 @@
+     older: messages.slice(0, split),
+     recent: messages.slice(split),
+   };
++}
++
++// eve-tokyo anchors: a mechanical index of exact identifiers appended to every checkpoint, so
++// paths, error lines and commands survive summary-of-summary rounds verbatim. Idea credited to
++// Nous Research's Hermes compaction eval ("anchor index", SCORECARD-2026-08-15).
++const ANCHOR_INDEX_HEADER = "Exact references (mechanically extracted, newest first):";
++const ANCHOR_INDEX_BUDGET = 6_000;
++const PATH_RE = /(?:[\w.-]+\/)+[\w.-]+\.[A-Za-z]{1,5}\b/g;
++const ERROR_LINE_RE = /^.*(?:Error\b|FAIL\b|\bE_[A-Z]+|\bTS\d{4}\b|exception|panic).*$/gm;
++
++function extractAnchors(text: string): string[] {
++  const found: string[] = [];
++  for (const m of text.matchAll(ERROR_LINE_RE)) found.push(`error: ${m[0].trim().slice(0, 200)}`);
++  for (const m of text.matchAll(PATH_RE)) found.push(`path: ${m[0]}`);
++  return found;
++}
++
++function messageText(message: ModelMessage): string {
++  if (typeof message.content === "string") return message.content;
++  return message.content
++    .map((part) => {
++      if (part.type === "text") return part.text;
++      if (part.type === "tool-call") {
++        const input = part.input as { command?: unknown } | undefined;
++        const command = typeof input?.command === "string" ? `\ncommand: ${input.command}\n` : "";
++        return `${JSON.stringify(part.input ?? "")}${command}`;
++      }
++      if (part.type === "tool-result") {
++        const output = part.output as { type: string; value?: unknown };
++        return typeof output.value === "string" ? output.value : JSON.stringify(output.value ?? "");
++      }
++      return "";
++    })
++    .join("\n")
++    .replace(/\\n/g, "\n");
+ }
++
++function withAnchorIndex(summary: string, previousCheckpoint: string | undefined, older: readonly ModelMessage[]): string {
++  const body = summary.split(ANCHOR_INDEX_HEADER)[0]!.trimEnd();
++  const previous = previousCheckpoint?.split(ANCHOR_INDEX_HEADER)[1] ?? "";
++  const previousEntries = previous.split("\n").map((l) => l.replace(/^- /, "").trim()).filter(Boolean);
++  const fresh: string[] = [];
++  for (const message of older) {
++    const text = messageText(message);
++    for (const line of text.split("\n")) {
++      const command = /^command: (.+)$/.exec(line);
++      if (command) fresh.push(`command: ${command[1]!.slice(0, 200)}`);
++    }
++    fresh.push(...extractAnchors(text));
++  }
++  const ordered = [...fresh.reverse(), ...previousEntries];
++  const seen = new Set<string>();
++  const kept: string[] = [];
++  let size = 0;
++  for (const entry of ordered) {
++    if (seen.has(entry)) continue;
++    seen.add(entry);
++    if (size + entry.length + 3 > ANCHOR_INDEX_BUDGET) break;
++    kept.push(entry);
++    size += entry.length + 3;
++  }
++  return kept.length === 0 ? body : `${body}\n\n${ANCHOR_INDEX_HEADER}\n${kept.map((e) => `- ${e}`).join("\n")}`;
++}
+--- a/prompt.ts	2026-10-13 22:31:31
++++ b/prompt.ts	2026-10-13 22:35:09
+@@ -318,6 +318,19 @@
+   return limit === undefined ? value.trim() : capText(value, limit);
+ }
+ 
++
++// eve-tokyo headtail: keep the start and the end of an oversized payload.
++const HEAD_SHARE = 0.6;
++export function headTailSlice(value: string, limit: number): string {
++  if (value.length <= limit) return value;
++  const head = sliceUtf16Safe(value, Math.ceil(limit * HEAD_SHARE));
++  let tailStart = value.length - (limit - head.length);
++  const first = value.charCodeAt(tailStart);
++  if (first >= 0xdc00 && first <= 0xdfff) tailStart += 1;
++  const omitted = tailStart - head.length;
++  return `${head} …[${omitted} chars omitted]… ${value.slice(tailStart)}`;
++}
++
+ // Providers reject lone surrogates created by cutting an astral character in half.
+ export function sliceUtf16Safe(value: string, limit: number): string {
+   if (limit <= 0) {
+@@ -340,5 +353,5 @@
+     return normalized;
+   }
+ 
+-  return `${sliceUtf16Safe(normalized, limit).trimEnd()}…`;
++  return headTailSlice(normalized, limit);
+ }

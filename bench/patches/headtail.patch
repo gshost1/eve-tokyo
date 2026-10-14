@@ -1,0 +1,60 @@
+--- a/engine.ts	2026-10-13 22:31:31
++++ b/engine.ts	2026-10-13 22:31:42
+@@ -5,7 +5,7 @@
+   COMPACTION_PROMPT_ENVELOPE,
+   COMPACTION_RESUMPTION_MESSAGE,
+   createCompactionPrompt,
+-  sliceUtf16Safe,
++  headTailSlice,
+   stubContentOutputFileParts,
+   TRANSCRIPT_PAYLOAD_LIMIT,
+ } from "#harness/compaction/prompt.js";
+@@ -281,6 +281,10 @@
+       // File parts of a content output reduce to their text stubs before the
+       // size check: serializing raw payloads into a prefix cap would keep
+       // bytes the model cannot read while cutting the text it can.
++      // eve-tokyo fix4771: an already-capped output is left alone.
++      if (part.output.type === "text" && part.output.value.startsWith(CAPPED_RESULT_ANNOTATION)) {
++        return part;
++      }
+       const output = stubContentOutputFileParts(part.output) as typeof part.output;
+       const serialized = JSON.stringify(output) ?? "";
+       if (serialized.length <= TRANSCRIPT_PAYLOAD_LIMIT) {
+@@ -296,7 +300,7 @@
+         ...part,
+         output: {
+           type: "text" as const,
+-          value: `${CAPPED_RESULT_ANNOTATION}\n\n${sliceUtf16Safe(serialized, TRANSCRIPT_PAYLOAD_LIMIT)}`,
++          value: `${CAPPED_RESULT_ANNOTATION}\n\n${headTailSlice(serialized, TRANSCRIPT_PAYLOAD_LIMIT)}`,
+         },
+       };
+     });
+--- a/prompt.ts	2026-10-13 22:31:31
++++ b/prompt.ts	2026-10-13 22:31:42
+@@ -318,6 +318,19 @@
+   return limit === undefined ? value.trim() : capText(value, limit);
+ }
+ 
++
++// eve-tokyo headtail: keep the start and the end of an oversized payload.
++const HEAD_SHARE = 0.6;
++export function headTailSlice(value: string, limit: number): string {
++  if (value.length <= limit) return value;
++  const head = sliceUtf16Safe(value, Math.ceil(limit * HEAD_SHARE));
++  let tailStart = value.length - (limit - head.length);
++  const first = value.charCodeAt(tailStart);
++  if (first >= 0xdc00 && first <= 0xdfff) tailStart += 1;
++  const omitted = tailStart - head.length;
++  return `${head} …[${omitted} chars omitted]… ${value.slice(tailStart)}`;
++}
++
+ // Providers reject lone surrogates created by cutting an astral character in half.
+ export function sliceUtf16Safe(value: string, limit: number): string {
+   if (limit <= 0) {
+@@ -340,5 +353,5 @@
+     return normalized;
+   }
+ 
+-  return `${sliceUtf16Safe(normalized, limit).trimEnd()}…`;
++  return headTailSlice(normalized, limit);
+ }

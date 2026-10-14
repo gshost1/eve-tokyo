@@ -1,0 +1,13 @@
+--- a/engine.ts	2026-10-13 22:31:31
++++ b/engine.ts	2026-10-13 22:31:42
+@@ -281,6 +281,10 @@
+       // File parts of a content output reduce to their text stubs before the
+       // size check: serializing raw payloads into a prefix cap would keep
+       // bytes the model cannot read while cutting the text it can.
++      // eve-tokyo fix4771: an already-capped output is left alone.
++      if (part.output.type === "text" && part.output.value.startsWith(CAPPED_RESULT_ANNOTATION)) {
++        return part;
++      }
+       const output = stubContentOutputFileParts(part.output) as typeof part.output;
+       const serialized = JSON.stringify(output) ?? "";
+       if (serialized.length <= TRANSCRIPT_PAYLOAD_LIMIT) {
