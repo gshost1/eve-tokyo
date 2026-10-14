@@ -2,32 +2,36 @@
 
 Compaction drift benchmark for [eve](https://github.com/vercel/eve) agents.
 
-Long agent runs compact more than once, and each compaction rewrites the last
-checkpoint. eve-tokyo measures what survives: it replays long coding sessions through
+eve's compaction is a thoughtful design: it trims old tool output before ever calling a
+model, so most compactions are fast and free, and it only writes a summary when trimming isn't
+enough. Long agent runs still compact many times, and each summary updates the last one.
+eve-tokyo measures what survives: it replays long coding sessions through
 eve's real compaction engine, compacts them repeatedly, and scores which exact details
 (file paths, error strings, commands, decisions) are still in context after each round,
 alongside context reduction, cost and latency.
 
 ## Results
 
-**Every build and test run in these sessions failed. Under eve's head-only tool-result cap,
-the checkpoint model reported some of them as successful in 7 of 30 checkpoints
-("`tsc` compile ran cleanly (empty stderr)"). With a head + tail cap: 0 of 30.**
+**The biggest easy win: keep the end of each trimmed tool output, not just the start.**
+Every build and test run in these sessions failed, and the failure was always at the end of
+the output. Keeping only the start, the summary described a failing build as passing in 7 of 30
+checkpoints ("`tsc` compile ran cleanly (empty stderr)"). Keeping the start and the end: 0 of 30.
 
 Measured against eve at [`0fd4240`](https://github.com/vercel/eve/commit/0fd4240d31c0fdf18e61dfdedf3c203eb595bba2)
 (eve 0.79.0), 3 synthetic sessions, summarizer `anthropic/claude-haiku-5.5` via Vercel AI Gateway.
 60 summary calls, about $0.80 in total.
 
-### Two bugs found and filed
+### Contributed upstream
 
 - [vercel/eve#4769](https://github.com/vercel/eve/issues/4769): an already-capped tool result is
   capped again at every later compaction, so its content shrinks each round (400-line grep:
-  60 → 48 → 35 paths visible). Confirmed by the eve team; fix in
+  60 → 48 → 35 paths visible). The eve team confirmed it and had a fix up within hours:
   [vercel/eve#4771](https://github.com/vercel/eve/pull/4771).
   Repro: [gshost1/eve-recap-repro](https://github.com/gshost1/eve-recap-repro).
-- [vercel/eve#4772](https://github.com/vercel/eve/issues/4772): the cap keeps only the first
-  2,000 chars of a result, so test failures, compiler errors and bash's `exitCode` are lost
-  first, while eve's own `bash` tool deliberately keeps the end of output.
+- [vercel/eve#4772](https://github.com/vercel/eve/issues/4772): proposes keeping the start and
+  the end of a capped result. eve's `bash` tool already keeps the end of output because that's
+  where errors appear; compaction can follow the same idea so test failures, compiler errors and
+  `exitCode` survive.
 
 ### Cap path (no model)
 
@@ -39,10 +43,10 @@ After the first cap, by where a detail sat inside a tool result (all 3 sessions)
 | eve default | 100% | 23% | 11% | 8% |
 | head + tail cap | 100% | 21% | 100% | 100% |
 
-Capping alone ratchets: it never shrinks anything but tool results, so each round frees less
+Trimming only ever touches tool results, so over a long run each round frees less
 (58% of context in round 1, ~5% by round 8) and compactions come closer together (every ~27
-steps, then every 1–4). The #4769 bug makes eve fall back to a model summary sooner: after 5–6
-cap rounds instead of 8–12 with the fix.
+steps, then every 1–4). That's when the summary takes over. With the #4771 fix, trimming lasts
+longer before a summary is needed: 8–12 rounds instead of 5–6.
 
 ### Summary path (summary of a summary)
 
@@ -57,9 +61,11 @@ the rejected one and the area in one sentence.
 | head + tail cap | 17% → 1% | 6% → 1% | 11% → 2% | 78% → 36% |
 | head + tail + identifier index | 11% → 9% | 11% → 2% | 12% → 3% | 67% → 76% |
 
-- After one summary, ~95% of exact error strings are gone; after five, ~99%.
-- Only the identifier index holds steady across rounds (paths 9–11% at every round). Its
-  6,000-char budget is the ceiling, not the summarizer.
+- Summaries keep the meaning well (decisions survive as paraphrase) but drop exact strings:
+  after one summary ~5% of exact error strings remain, after five ~1%. That's expected of any
+  summarizer, and it's what an exact-reference list is for.
+- The identifier index holds steady across rounds (paths 9–11% at every round), limited mainly by
+  its 6,000-char budget.
 - Per summary: $0.012–0.015, 18–34 s, ~93–96K input tokens. eve budgets the summary prompt at
   the 60K threshold using a chars/4 estimate; real input was ~1.55× that on this content.
 
@@ -104,6 +110,9 @@ Layers: `offline` (cap path only, stops when a summary would be needed), `null-s
 `BENCH_TURNS`, `BENCH_SUMMARY_ROUNDS`, `BENCH_MAX_ROUNDS`, `BENCH_STRATEGIES`, `BENCH_THRESHOLD`.
 
 ## Credits
+
+Thanks to the eve team at Vercel for an open, readable codebase and a very fast turnaround on
+#4769.
 
 - The recall-after-compaction framing and the identifier ("anchor") index come from
   [Nous Research's Hermes compaction eval](https://github.com/NousResearch/hermes-agent/tree/main/evals/compaction).
