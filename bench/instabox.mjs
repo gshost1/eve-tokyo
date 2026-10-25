@@ -6,12 +6,12 @@
 // box calls the Keysrs relay (AI_GATEWAY_BASE_URL) with it. Nothing secret is printed or stored.
 //
 //   up   [--ref <git ref>]                 create or resume the machine, bootstrap, clone, bench/setup.sh
-//   run  <tag> <model...> --token-stdin    model layer in the background on the box; waits; downloads results
+//   run  <tag> <model...> --token-stdin    model layer in the background on the box; waits; downloads results\n//        [--smoke]                       first one verified summary with the first model (1 seed), then the full run
 //        [--base-url <relay>/jev-ass/v4/ai] [--seeds 1,2,3] [--turns 160] [--max-rounds 80] [--rounds 5] [--concurrency 3]
 //   exec "<shell command>"                 one command on the box (<= 600 s)
 //   fetch <tag> <model...>                 download results/gw-<tag>-*.json|.log again
 //   down [--delete]                        stop the machine (or delete it)
-// Machine name: INSTABOX_MACHINE (default eve-tokyo). Repo: EVE_TOKYO_REPO.
+// Machine name: INSTABOX_MACHINE (default eve-tokyo). Template: INSTABOX_TEMPLATE (default agent-browser). Repo: EVE_TOKYO_REPO.
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -20,6 +20,8 @@ const API = "https://api.instabox.sh";
 const KEY = process.env.INSTABOX_API_KEY;
 const NAME = process.env.INSTABOX_MACHINE ?? "eve-tokyo";
 const REPO = process.env.EVE_TOKYO_REPO ?? "https://github.com/gshost1/eve-tokyo.git";
+// Free-plan orgs may only create from agent-browser (or a snapshot); paid ones can use universal.
+const TEMPLATE = process.env.INSTABOX_TEMPLATE ?? "agent-browser";
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const HOME = "/data/home";
 if (!KEY) fail("INSTABOX_API_KEY not set (run through `keys env eve-instabox INSTABOX_API_KEY -- ...`)");
@@ -38,14 +40,14 @@ for (let i = 0; i < rest.length; i += 1) {
 const log = (...a) => console.error(new Date().toISOString().slice(11, 19), ...a);
 function fail(msg) { console.error(msg); process.exit(1); }
 
-async function api(method, path, { body, raw, headers = {}, timeoutMs = 120_000 } = {}) {
+async function api(method, path, { body, raw, headers = {}, timeoutMs = 120_000, allow404 = false } = {}) {
   const res = await fetch(API + path, {
     method,
     headers: { "X-API-Key": KEY, ...(body !== undefined && !raw ? { "Content-Type": "application/json" } : {}), ...headers },
     body: raw ?? (body !== undefined ? JSON.stringify(body) : undefined),
     signal: AbortSignal.timeout(timeoutMs),
   });
-  if (res.status === 404) return { status: 404 };
+  if (res.status === 404 && allow404) return { status: 404 };
   const text = await res.text();
   let json;
   try { json = JSON.parse(text); } catch { json = { raw: text }; }
@@ -62,15 +64,15 @@ async function waitOp(id) {
   }
 }
 async function machine() {
-  const r = await api("GET", `/v1/machines/${NAME}`);
+  const r = await api("GET", `/v1/machines/${NAME}`, { allow404: true });
   return r.status === 404 ? null : r.json;
 }
 async function ensureRunning() {
   let m = await machine();
   if (!m) {
-    log(`creating machine ${NAME} (universal template)`);
+    log(`creating machine ${NAME} (${TEMPLATE} template)`);
     const { json: op } = await api("POST", "/v1/machines", {
-      body: { name: NAME, templateId: "universal", autoSuspendAfterSeconds: 1800, metadata: { project: "eve-tokyo" } },
+      body: { name: NAME, templateId: TEMPLATE, autoSuspendAfterSeconds: 1800, metadata: { project: "eve-tokyo" } },
       headers: idem(),
     });
     await waitOp(op.id);
@@ -99,25 +101,45 @@ async function exec(id, shell, { envs, timeoutSeconds = 120, cwd } = {}) {
   });
   return json;
 }
+// The API has no file-write route; small files go in through exec's stdin (<= 1 MiB).
 async function upload(id, path, content, mode = "0644") {
-  const q = new URLSearchParams({ path, mode, parents: "true" });
-  await api("PUT", `/v1/machines/${id}/files?${q}`, { raw: content, headers: { "Content-Type": "application/octet-stream" } });
+  const text = Buffer.isBuffer(content) ? content.toString("utf8") : String(content);
+  const { json } = await api("POST", `/v1/machines/${id}/exec`, {
+    body: { cmd: `mkdir -p ${JSON.stringify(dirname(path))} && cat > ${JSON.stringify(path)} && chmod ${mode} ${JSON.stringify(path)}`, stdin: text, timeoutSeconds: 30 },
+  });
+  if (json.exitCode !== 0) throw new Error(`upload ${path} failed: ${json.stderr}`);
 }
+const q = (x) => JSON.stringify(x);
 async function download(id, path) {
   const res = await fetch(`${API}/v1/machines/${id}/files/content?${new URLSearchParams({ path })}`, {
     headers: { "X-API-Key": KEY }, signal: AbortSignal.timeout(600_000),
   });
-  if (!res.ok) throw new Error(`download ${path} -> ${res.status}`);
-  return Buffer.from(await res.arrayBuffer());
+  if (res.ok) return Buffer.from(await res.arrayBuffer());
+  if (res.status !== 404) throw new Error(`download ${path} -> ${res.status}`);
+  // No content route on this API: gzip on the box and pull base64 chunks through exec stdout.
+  const gz = `/tmp/dl-${process.pid}.gz`;
+  const st = await exec(id, `gzip -c ${q(path)} > ${gz} && stat -c %s ${gz}`, { timeoutSeconds: 120 });
+  if (st.exitCode !== 0) throw new Error(`gzip ${path}: ${st.stderr}`);
+  const size = Number(st.stdout.trim());
+  const CHUNK = 96 * 1024;
+  const parts = [];
+  for (let off = 0; off < size; off += CHUNK) {
+    const r = await exec(id, `tail -c +${off + 1} ${gz} | head -c ${CHUNK} | base64 -w0`, { timeoutSeconds: 60 });
+    if (r.exitCode !== 0 || r.truncated) throw new Error(`chunk at ${off} of ${path}: exit ${r.exitCode}, truncated ${r.truncated}`);
+    parts.push(Buffer.from(r.stdout.trim(), "base64"));
+  }
+  await exec(id, `rm -f ${gz}`, { timeoutSeconds: 30 });
+  const { gunzipSync } = await import("node:zlib");
+  return gunzipSync(Buffer.concat(parts));
 }
 // Long jobs: exec is synchronous and capped at 600 s, so the job goes into a script on the box,
 // starts detached (inheriting the exec call's envs, so nothing secret touches the disk) and an exit
 // file is polled.
 async function background(id, name, shell, envs) {
   await upload(id, `${HOME}/runs/${name}.sh`, `#!/usr/bin/env bash\n${shell}\necho $? > ~/runs/${name}.exit\n`, "0755");
-  const start = `rm -f ~/runs/${name}.exit; nohup bash ~/runs/${name}.sh > ~/runs/${name}.log 2>&1 < /dev/null & echo started`;
+  const start = `rm -f ~/runs/${name}.exit; setsid nohup bash ~/runs/${name}.sh > ~/runs/${name}.log 2>&1 < /dev/null & disown; sleep 1; pgrep -f ~/runs/${name}.sh > /dev/null && echo started || { echo 'job died immediately'; cat ~/runs/${name}.log; exit 3; }`;
   const r = await exec(id, start, { envs, timeoutSeconds: 60 });
-  if (r.exitCode !== 0) throw new Error(`could not start ${name}: ${r.stderr}`);
+  if (r.exitCode !== 0) throw new Error(`could not start ${name}: ${r.stdout} ${r.stderr}`);
   let lastTail = "";
   for (;;) {
     await new Promise((res) => setTimeout(res, 30_000));
@@ -150,6 +172,12 @@ async function main() {
   }
   const m = await ensureRunning();
   log(`machine ${NAME} ${m.id} running`);
+  if (cmd === "probe") {
+    await exec(m.id, "mkdir -p ~/runs && ls -la ~ ~/runs; echo HOME=$HOME USER=$(id -un) SHELL=$SHELL; which setsid tmux systemd-run git curl python3 xz node; setsid nohup sleep 300 > ~/runs/probe.log 2>&1 < /dev/null & disown; sleep 1; pgrep -af 'sleep 300'", { timeoutSeconds: 30 }).then((r) => console.log(r.stdout, r.stderr));
+    await new Promise((r) => setTimeout(r, 8_000));
+    const r = await exec(m.id, "pgrep -af 'sleep 300' || echo 'detached process did NOT survive'; ls -la ~/runs", { timeoutSeconds: 30 });
+    return console.log(r.stdout, r.stderr);
+  }
   if (cmd === "exec") {
     const r = await exec(m.id, PATH_PREFIX + args.join(" "), { timeoutSeconds: 600 });
     process.stdout.write(r.stdout); process.stderr.write(r.stderr); process.exit(r.exitCode);
@@ -177,8 +205,25 @@ async function main() {
         BENCH_SUMMARY_ROUNDS: String(flags.rounds ?? 5),
         BENCH_CONCURRENCY: String(flags.concurrency ?? 3),
       };
-      log(`run ${tag}: ${models.join(", ")} via ${flags["base-url"] ?? "ai-gateway.vercel.sh"}`);
-      await background(m.id, `run-${tag}`, `${PATH_PREFIX}cd ~/eve-tokyo && ./bench/run-gw.sh ${tag} ${models.join(" ")}`, envs);
+      const via = flags["base-url"] ?? "ai-gateway.vercel.sh";
+      if (flags.smoke) {
+        const smokeEnvs = { ...envs, BENCH_SEEDS: "1", BENCH_SUMMARY_ROUNDS: "1" };
+        log(`smoke: one summary with ${models[0]} via ${via}`);
+        await background(m.id, "run-smoke", `${PATH_PREFIX}mkdir -p ~/eve-tokyo/results && cd ~/eve-tokyo && ./bench/run-gw.sh smoke ${models[0]}`, smokeEnvs);
+        const buf = await download(m.id, `${HOME}/eve-tokyo/results/gw-smoke-${safe(models[0])}.json`);
+        const d = JSON.parse(buf.toString("utf8"));
+        const r = d.results[0];
+        const summaries = (r.rounds ?? []).filter((x) => x.path === "summary");
+        if (r.error || summaries.length === 0 || !(summaries[0].summary.inputTokens > 0)) {
+          const logTail = await exec(m.id, `tail -n 30 ~/eve-tokyo/results/gw-smoke-${safe(models[0])}.log`, { timeoutSeconds: 30 });
+          console.error(logTail.stdout);
+          throw new Error(`smoke failed: ${r.error ?? "no summary produced"}`);
+        }
+        const sm = summaries[0].summary;
+        log(`smoke ok: summary at round ${summaries[0].round}, ${sm.inputTokens} in / ${sm.outputTokens} out, $${sm.costUsd}, ${Math.round(sm.ms / 1000)} s`);
+      }
+      log(`run ${tag}: ${models.join(", ")} via ${via}`);
+      await background(m.id, `run-${tag}`, `${PATH_PREFIX}mkdir -p ~/eve-tokyo/results && cd ~/eve-tokyo && ./bench/run-gw.sh ${tag} ${models.join(" ")}`, envs);
     }
     mkdirSync(join(ROOT, "results"), { recursive: true });
     for (const model of models) {

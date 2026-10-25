@@ -5,6 +5,7 @@ set -euo pipefail
 REPO="$1"; REF="$2"
 export PATH="$HOME/.local/node/bin:$HOME/.local/bin:$PATH"
 mkdir -p "$HOME/.local" "$HOME/runs"
+echo "[1/4] node"
 need_node=1
 if command -v node >/dev/null 2>&1; then
   major="$(node -p 'process.versions.node.split(".")[0]')"
@@ -16,9 +17,12 @@ if [ "$need_node" = 1 ]; then
   rm -rf "$HOME/.local/node" && mkdir -p "$HOME/.local/node"
   tar -xJf /tmp/node.tar.xz -C "$HOME/.local/node" --strip-components=1
 fi
+echo "[2/4] pnpm"
 command -v pnpm >/dev/null 2>&1 || npm install -g --prefix "$HOME/.local" pnpm@12 >/dev/null
 command -v git >/dev/null 2>&1 || { echo "git missing on the box" >&2; exit 2; }
+echo "[3/4] clone $REPO @ $REF"
 if [ ! -d "$HOME/eve-tokyo/.git" ]; then git clone -q "$REPO" "$HOME/eve-tokyo"; fi
 git -C "$HOME/eve-tokyo" fetch -q origin && git -C "$HOME/eve-tokyo" checkout -q "$REF"
+echo "[4/4] bench/setup.sh (eve fetch + pnpm install, the slow part)"
 cd "$HOME/eve-tokyo" && ./bench/setup.sh
 echo "bootstrap ok: node $(node --version), pnpm $(pnpm --version), eve-tokyo at $(git rev-parse --short HEAD)"

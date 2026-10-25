@@ -4,6 +4,7 @@
 set -uo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 TAG="$1"; shift
+mkdir -p "$ROOT/results"
 cd "$ROOT/.cache/eve/packages/eve"
 for model in "$@"; do
   safe="${model//\//_}"
