@@ -117,17 +117,27 @@ Each is a small patch in [`bench/patches/`](bench/patches) applied to a copy of 
 Needs Node 24+ and pnpm.
 
 ```bash
-./bench/setup.sh
+./bench/setup.sh                      # eve at a3654ef (#4771 + #4773 merged); EVE_SHA=0fd4240d31c0fdf18e61dfdedf3c203eb595bba2 for the published pin
+./bench/probes.sh                     # the bug repros (pass at 0fd4240) and the *.fixed probes (pass at a3654ef)
 cd .cache/eve/packages/eve
 BENCH_LAYER=offline BENCH_OUT=$PWD/offline.json npx vitest run --config vitest.bench.config.ts
 python3 ../../../../bench/summarize.py offline.json
 ```
 
+`bench/setup.sh` pins eve, applies the strategy patches written for that commit
+([`bench/patches/<sha>/`](bench/patches)) and generates the strategy list. At `0fd4240` that is
+the four strategies above; at `a3654ef` eve's own engine already contains the fixes and runs as
+`eve-4773`.
+
 Layers: `offline` (cap path only, stops when a summary would be needed), `null-summary`
-(a summarizer that keeps nothing, free), `model` (real summarizer; needs `AI_GATEWAY_API_KEY`,
-`BENCH_MODEL` defaults to `anthropic/claude-haiku-5.5`), `do` (DigitalOcean inference; needs
-`DO_KEY`). `bench/run-gw.sh` and `bench/run-do-par.sh` run several models. Other knobs: `BENCH_SEEDS`,
-`BENCH_TURNS`, `BENCH_SUMMARY_ROUNDS`, `BENCH_MAX_ROUNDS`, `BENCH_STRATEGIES`, `BENCH_THRESHOLD`, `BENCH_CONCURRENCY`.
+(a summarizer that keeps nothing, free), `model` (real summarizer through Vercel AI Gateway; needs
+`AI_GATEWAY_API_KEY`, `BENCH_MODEL` defaults to `anthropic/claude-haiku-5.5`, `AI_GATEWAY_BASE_URL`
+optionally points it at a proxy such as a [Keysrs](https://github.com/gshost1/Keysreallysafe) gateway
+or relay), `do` (DigitalOcean inference; needs `DO_KEY`). `bench/run-gw.sh` runs several models;
+`bench/with-token.mjs` feeds a Keysrs grant or client token from stdin; `bench/instabox.mjs` runs the
+model layer on an [InstaBox](https://instabox.sh) machine over its API. Other knobs: `BENCH_SEEDS`,
+`BENCH_TURNS`, `BENCH_SUMMARY_ROUNDS`, `BENCH_MAX_ROUNDS`, `BENCH_STRATEGIES`, `BENCH_THRESHOLD`,
+`BENCH_CONCURRENCY`.
 
 ## Credits
 

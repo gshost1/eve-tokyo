@@ -2,24 +2,14 @@ import { writeFileSync } from "node:fs";
 
 import { it } from "vitest";
 
-import * as anchors from "#harness/compaction/engine.anchors.js";
-import * as fix4771 from "#harness/compaction/engine.fix4771.js";
-import * as headtail from "#harness/compaction/engine.headtail.js";
-import * as eveDefault from "#harness/compaction/engine.js";
 import type { CompactionConfig } from "#harness/types.js";
 
-import { replay, type Engine, type Summarizer } from "./replay.js";
+import { replay, type Summarizer } from "./replay.js";
 import { generateSession } from "./sessions.js";
+import { EVE_SHA, STRATEGIES } from "./strategies.js";
 
-// Run from packages/eve:
+// Run from packages/eve (bench/setup.sh generates strategies.ts for the pinned eve commit):
 //   BENCH_LAYER=offline BENCH_OUT=/abs/out.json npx vitest run --config vitest.bench.config.ts
-
-const STRATEGIES: Record<string, Engine> = {
-  "eve-default": eveDefault,
-  "fix-4771": fix4771,
-  "head-tail": headtail,
-  "head-tail+anchors": anchors,
-};
 const only = process.env.BENCH_STRATEGIES?.split(",");
 
 const layer = process.env.BENCH_LAYER ?? "offline";
@@ -77,7 +67,7 @@ it(
         }
       }),
     );
-    writeFileSync(out, JSON.stringify({ config, layer, maxRounds, maxSummaryRounds, model: process.env.BENCH_MODEL, results, seeds, turns }, null, 1));
+    writeFileSync(out, JSON.stringify({ config, eve: EVE_SHA, layer, maxRounds, maxSummaryRounds, model: process.env.BENCH_MODEL, results, seeds, turns }, null, 1));
   },
   60 * 60 * 1000,
 );

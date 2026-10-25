@@ -135,3 +135,46 @@ cd <eve>/packages/eve && npx vitest run --config vitest.unit.config.ts --silent=
 - Read only the Nous README and the two scorecards, not runner code or the Codex head-to-head in full.
 - X search returns ~15 top results per query; not exhaustive.
 - GitHub code search covered `TRANSCRIPT_PAYLOAD_LIMIT` and compaction-eval terms only.
+
+## Rerun at the merged fix (vercel/eve a3654ef7e, read 2026-10-25)
+
+a3654ef7e is the merge of #4773 (head + tail cap) and contains #4771 (idempotent cap). Between
+0fd4240 and a3654ef7e nothing else in `harness/compaction/` changed (#4770 added a test). The next
+compaction change upstream is #5199 (2026-10-24, mid-turn announcement), unrelated to capping.
+
+Upstream's implementation vs the eve-tokyo `head-tail` patch: same shape. `clipMiddleUtf16Safe`
+keeps `ceil(0.6 * kept)` head chars and the rest as tail with a ` … [N chars omitted] … ` marker,
+sized so the whole value stays within `TRANSCRIPT_PAYLOAD_LIMIT`; applied in `capToolResults` and,
+through `capPayload`, to tool results and tool calls in the summarizer transcript. The patch used
+the same 60/40 split and marker but did not count the marker against the limit.
+
+### Engine level (free, deterministic)
+
+Probes, `./bench/probes.sh` at a3654ef7e:
+
+| Probe | At 0fd4240 (bug) | At a3654ef7e |
+|---|---|---|
+| headcap: FAIL line / error / summary line / `exitCode` kept after one cap | no / no / no / no, 44 passing lines | yes / yes / yes / yes, 35 passing lines, elision marker present |
+| recap: annotations per round, module paths kept (of 400) | 1,2,3,4; 60 → 48 → 35 → 22 | 1,1,1,1; 57 every round, value byte-identical, FAIL line kept |
+
+The original bug probes fail at a3654ef7e on exactly the assertions that encoded the bug
+(`failLineKept` is now true; annotations are `[1,1,1,1]`). `probes/*.fixed.probe.test.ts` pass.
+
+Offline layer (cap path only, 3 seeds, `results/offline-4773.json`), eve as shipped (`eve-4773`):
+
+| | eve default at 0fd4240 | head-tail patch at 0fd4240 | eve-4773 |
+|---|---|---|---|
+| tail details after cap 1 (seed 1) | 5/43 | 43/43 | 43/43 |
+| exact errors after cap 1 (seed 1) | 1/21 | 21/21 | 21/21 |
+| paths after cap 1 (seed 1) | 23/52 | 40/52 | 40/52 |
+| cap rounds before a summary is needed | 5–6 | 8+ (run cap) | 8+ (run cap) |
+
+eve-4773 tracks the head-tail patch within a few paths per round (e.g. seed 1 r8: 112/153 vs
+108/146 paths, tails 126/126 vs 121/121) and keeps 100% of tail details on every round.
+
+### Model level
+
+Not yet run. Plan: same six summarizers through the Vercel AI Gateway (the three former
+DigitalOcean models exist there as `deepseek/deepseek-v4.1-flash`, `alibaba/qwen3.8-max`,
+`moonshotai/kimi-k2.6`), one strategy, on an InstaBox machine through the Keysrs relay.
+Pass criterion: 0/15 false "it passed" per model.

@@ -13,7 +13,8 @@ from collections import defaultdict
 
 files = [a for a in sys.argv[1:] if not a.startswith("--")]
 md = "--md" in sys.argv
-ORDER = ["eve-default", "fix-4771", "head-tail", "head-tail+anchors"]
+ORDER = ["eve-default", "fix-4771", "head-tail", "head-tail+anchors", "eve-4773"]
+HEAD_ONLY = ("eve-default", "fix-4771")  # eve-4773 is eve at a3654ef, head + tail built in
 
 # A checkpoint line that says a build/test/compile went fine.
 FALSE_OK = re.compile(
@@ -102,7 +103,7 @@ else:
 # Headline: false "it passed" by cap type, pooled over models.
 pool = defaultdict(lambda: [0, 0])
 for r in rows:
-    kind = "head-only cap" if r["strategy"] in ("eve-default", "fix-4771") else "head+tail cap"
+    kind = "head-only cap" if r["strategy"] in HEAD_ONLY else "head+tail cap"
     pool[kind][0] += r["false_ok"]
     pool[kind][1] += r["ckpts"]
 print()
