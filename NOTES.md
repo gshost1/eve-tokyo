@@ -172,9 +172,40 @@ Offline layer (cap path only, 3 seeds, `results/offline-4773.json`), eve as ship
 eve-4773 tracks the head-tail patch within a few paths per round (e.g. seed 1 r8: 112/153 vs
 108/146 paths, tails 126/126 vs 121/121) and keeps 100% of tail details on every round.
 
-### Model level
+### Model level (2026-10-25, InstaBox + Keysrs relay)
 
-Not yet run. Plan: same six summarizers through the Vercel AI Gateway (the three former
-DigitalOcean models exist there as `deepseek/deepseek-v4.1-flash`, `alibaba/qwen3.8-max`,
-`moonshotai/kimi-k2.6`), one strategy, on an InstaBox machine through the Keysrs relay.
-Pass criterion: 0/15 false "it passed" per model.
+Same shape as the published runs (160 turns, up to 80 compactions, 5 summaries, seeds 1–3), eve at
+a3654ef7e unpatched (`eve-4773`), all summarizers through Vercel AI Gateway. `results/gw-fix-*.json`.
+
+| Summarizer | false "passed": default @0fd4240 → head-tail patch → eve @a3654ef | paths S1→S5 | errors S1→S5 | $/15 summaries | s/summary |
+|---|---|---|---|---|---|
+| anthropic/claude-haiku-5.5 | 3 → 0 → 0 | 13% → 1% | 4% → 1% | 0.22 | 35 |
+| openai/gpt-6-luna-fast | 1 → 0 → 0 | 9% → 2% | 10% → 2% | 0.21 | 7 |
+| google/gemini-3.8-flash | 0 → 0 → 0 | 10% → 4% | 4% → 1% | 0.94 | 16 |
+| deepseek/deepseek-v4.1-flash | 15 → 0 → 0 | 5% → 1% | 4% → 1% | 0.35 | 24 |
+| alibaba/qwen3.8-max | 10 → 0 → 0 | 30% → 7% | 36% → 8% | 3.16 | 69 |
+| moonshotai/kimi-k2.6 | 8 → 0 → not run | | | | |
+
+- Pooled: head-only 72/180; head + tail (patch 0/180 + fix 0/75) 0/255.
+- First summary at rounds 10/15/12 (seeds 1/2/3) vs 6/7/6 for the old default; the patch had 11/9/13.
+- Kimi stopped by hand after Qwen's bill (its partial file on the box is an error stub); grants revoked,
+  box stopped (not deleted, machine `eve-tokyo`).
+
+Run mechanics: `bench/instabox.mjs up/run/watch/fetch/down` over the InstaBox HTTP API (free plan:
+`agent-browser` template only; no file-write route, so uploads go through exec stdin and downloads
+through gzip + base64 chunks; exec is synchronous, 600 s max, so jobs detach with setsid and are polled
+every 30 s; one transient 502 mid-poll). Keys: `keys env eve-instabox` for the box, a `keys grant
+jev-ass --paths /v4/ai --max-usd` token piped into the driver; box → `https://keysrs-relay…/jev-ass/v4/ai`
+→ Mac gateway → Vercel. Smoke (1 seed, 1 summary) before the full set. Total spend ≈ $5 incl. smokes
+and a few Kimi calls.
+
+Keysrs observations: raw key never left the Mac; revoke took effect within a second (403
+`grant_revoked` in `keys log`); but the grant's USD column stayed 0.0000 over 84 requests, so
+`--max-usd` cannot trigger for Vercel AI Gateway calls: the gateway doesn't price them, while the cost
+is right there in the response's provider metadata, which the bench reads. Grants also die on screen
+lock, so the Mac stayed unlocked for the run.
+
+### Not confirmed
+- Why Qwen's exact retention at the fix (30% → 7%) is well above every other row (5–13%); one run,
+  gateway serving vs DigitalOcean, not investigated.
+- Kimi at the fix (not run).

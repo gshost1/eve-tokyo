@@ -9,7 +9,7 @@
 //   run  <tag> <model...> --token-stdin    model layer in the background on the box; waits; downloads results\n//        [--smoke]                       first one verified summary with the first model (1 seed), then the full run
 //        [--base-url <relay>/jev-ass/v4/ai] [--seeds 1,2,3] [--turns 160] [--max-rounds 80] [--rounds 5] [--concurrency 3]
 //   exec "<shell command>"                 one command on the box (<= 600 s)
-//   fetch <tag> <model...>                 download results/gw-<tag>-*.json|.log again
+//   watch <tag> <model...>                 reattach to a running job, wait, download\n//   fetch <tag> <model...>                 download results/gw-<tag>-*.json|.log again
 //   down [--delete]                        stop the machine (or delete it)
 // Machine name: INSTABOX_MACHINE (default eve-tokyo). Template: INSTABOX_TEMPLATE (default agent-browser). Repo: EVE_TOKYO_REPO.
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
@@ -134,16 +134,28 @@ async function download(id, path) {
 }
 // Long jobs: exec is synchronous and capped at 600 s, so the job goes into a script on the box,
 // starts detached (inheriting the exec call's envs, so nothing secret touches the disk) and an exit
-// file is polled.
-async function background(id, name, shell, envs) {
+// file is polled. Polling tolerates transient API errors (502s happen); the job itself is unaffected.
+async function startJob(id, name, shell, envs) {
   await upload(id, `${HOME}/runs/${name}.sh`, `#!/usr/bin/env bash\n${shell}\necho $? > ~/runs/${name}.exit\n`, "0755");
   const start = `rm -f ~/runs/${name}.exit; setsid nohup bash ~/runs/${name}.sh > ~/runs/${name}.log 2>&1 < /dev/null & disown; sleep 1; pgrep -f ~/runs/${name}.sh > /dev/null && echo started || { echo 'job died immediately'; cat ~/runs/${name}.log; exit 3; }`;
   const r = await exec(id, start, { envs, timeoutSeconds: 60 });
   if (r.exitCode !== 0) throw new Error(`could not start ${name}: ${r.stdout} ${r.stderr}`);
+}
+async function waitJob(id, name) {
   let lastTail = "";
+  let failures = 0;
   for (;;) {
     await new Promise((res) => setTimeout(res, 30_000));
-    const s = await exec(id, `cat ~/runs/${name}.exit 2>/dev/null; echo ---; tail -n 3 ~/runs/${name}.log 2>/dev/null`, { timeoutSeconds: 30 });
+    let s;
+    try {
+      s = await exec(id, `cat ~/runs/${name}.exit 2>/dev/null; echo ---; tail -n 3 ~/runs/${name}.log 2>/dev/null`, { timeoutSeconds: 30 });
+      failures = 0;
+    } catch (e) {
+      failures += 1;
+      log(`poll failed (${failures}/20): ${String(e.message).slice(0, 120)}`);
+      if (failures >= 20) throw e;
+      continue;
+    }
     const [exit, ...tailLines] = s.stdout.split("---");
     const tail = tailLines.join("---").trim();
     if (tail && tail !== lastTail) { log(`[${name}] ${tail.split("\n").slice(-1)[0]}`); lastTail = tail; }
@@ -152,6 +164,19 @@ async function background(id, name, shell, envs) {
       const full = await exec(id, `tail -n 40 ~/runs/${name}.log`, { timeoutSeconds: 30 });
       if (code !== 0) { console.error(full.stdout); throw new Error(`${name} exited ${code}`); }
       return full.stdout;
+    }
+  }
+}
+async function background(id, name, shell, envs) {
+  await startJob(id, name, shell, envs);
+  return waitJob(id, name);
+}
+async function withRetry(fn, what, tries = 5) {
+  for (let i = 1; ; i += 1) {
+    try { return await fn(); } catch (e) {
+      if (i >= tries) throw e;
+      log(`${what} failed (${i}/${tries}), retrying: ${String(e.message).slice(0, 120)}`);
+      await new Promise((r) => setTimeout(r, 10_000 * i));
     }
   }
 }
@@ -188,9 +213,13 @@ async function main() {
     const out = await background(m.id, "bootstrap", `bash ${HOME}/box-bootstrap.sh ${REPO} ${ref}`);
     return log(out.trim().split("\n").slice(-1)[0]);
   }
-  if (cmd === "run" || cmd === "fetch") {
+  if (cmd === "run" || cmd === "fetch" || cmd === "watch") {
     const [tag, ...models] = args;
-    if (!tag || models.length === 0) fail("usage: run <tag> <model...> --token-stdin");
+    if (!tag || models.length === 0) fail("usage: run|watch|fetch <tag> <model...>");
+    if (cmd === "watch") {
+      log(`watching run-${tag} on the box`);
+      await waitJob(m.id, `run-${tag}`);
+    }
     if (cmd === "run") {
       if (!flags["token-stdin"]) fail("run needs --token-stdin (pipe `keys grant ... --json` or `keys client issue ...` into it)");
       const token = readFileSync(0, "utf8").match(/ksfc?_[A-Za-z0-9._~-]+/)?.[0];
@@ -230,7 +259,7 @@ async function main() {
       for (const ext of ["json", "log"]) {
         const file = `gw-${tag}-${safe(model)}.${ext}`;
         try {
-          const buf = await download(m.id, `${HOME}/eve-tokyo/results/${file}`);
+          const buf = await withRetry(() => download(m.id, `${HOME}/eve-tokyo/results/${file}`), `download ${file}`);
           writeFileSync(join(ROOT, "results", file), buf);
           log(`fetched results/${file} (${(buf.length / 1024).toFixed(0)} KiB)`);
         } catch (e) { log(`missing ${file}: ${e.message}`); }

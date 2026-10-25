@@ -17,11 +17,14 @@ Every build and test run in these sessions failed, and the failure was always at
 the output. When compaction kept only the start, summaries described a failing build or test as
 passing in **72 of 180** checkpoints (40%) across six summarizer models
 ("every vitest run showed all specs passing"). When it kept the start and the end: **0 of 180**.
+eve has shipped that since 2026-10-15. Rerun against it, unpatched: **0 of 75** on five summarizers.
 
 Measured against eve at [`0fd4240`](https://github.com/vercel/eve/commit/0fd4240d31c0fdf18e61dfdedf3c203eb595bba2)
 (eve 0.79.0), 3 synthetic sessions, six summarizers: `anthropic/claude-haiku-5.5`,
 `openai/gpt-6-luna-fast` and `google/gemini-3.8-flash` via Vercel AI Gateway, and
 `deepseek-v4.1-flash`, `qwen3.8-max` and `kimi-k2.6` via DigitalOcean inference.
+The rerun after the fix ([below](#after-the-fix)) used eve at `a3654ef` and the same models through the
+gateway (the DigitalOcean three as `deepseek/deepseek-v4.1-flash`, `alibaba/qwen3.8-max`, `moonshotai/kimi-k2.6`).
 
 ### Contributed upstream
 
@@ -89,6 +92,37 @@ the gap with "passed". Keeping the end removes the question for every model.
 `glm-5.3` and `gemma-4-31B-it` were also tried and didn't finish within the 1-hour run limit.
 Full table: `python3 bench/compare.py results/model-haiku.json results/gw-full-*.json results/do-full-*.json --md`.
 
+### After the fix
+
+eve merged both fixes on 2026-10-15 ([#4771](https://github.com/vercel/eve/pull/4771),
+[#4773](https://github.com/vercel/eve/pull/4773)). Rerun on 2026-10-25 with the same sessions, seeds,
+scorer and summary count against eve at
+[`a3654ef`](https://github.com/vercel/eve/commit/a3654ef7e8fc193d128f6523ba915d476857589e), no patches,
+every summarizer through Vercel AI Gateway. Checkpoints claiming a failing build or test went fine,
+out of 15 per cell:
+
+| Summarizer | eve default at `0fd4240` | head + tail patch at `0fd4240` | eve as shipped at `a3654ef` |
+|---|---|---|---|
+| anthropic/claude-haiku-5.5 | 3 | 0 | 0 |
+| openai/gpt-6-luna-fast | 1 | 0 | 0 |
+| google/gemini-3.8-flash | 0 | 0 | 0 |
+| deepseek-v4.1-flash | 15 | 0 | 0 |
+| qwen3.8-max | 10 | 0 | 0 |
+| kimi-k2.6 | 8 | 0 | not rerun |
+
+- eve as shipped tracks the head + tail patch: exact retention lands within a few points of that row
+  on every model (paths 5–13% after one summary, 1–4% after five; Qwen higher at 30% → 7%, one run,
+  read as variance).
+- Sessions now go 10–15 cap rounds before their first summary instead of 6–7, because a capped result
+  no longer shrinks again at every compaction. Fewer paid summaries for the same work.
+- Per summary through the gateway: Haiku $0.015 / 35 s, gpt-6-luna-fast $0.014 / 7 s, Gemini 3.8 Flash
+  $0.063 / 16 s, DeepSeek V4.1 Flash $0.023 / 24 s, Qwen3.8 Max $0.21 / 69 s. Kimi was not rerun:
+  stopped for cost after Qwen's 15 summaries came to $3.16.
+- Engine level, free and deterministic: [`probes/*.fixed.probe.test.ts`](probes) pass at `a3654ef`
+  (FAIL line, error and exit code survive one cap; one annotation and identical bytes across four), the
+  original bug probes fail on their bug assertions, and the offline layer keeps 100% of tail details on
+  every cap round (`./bench/probes.sh`, `results/offline-4773.json`).
+
 ### Caveats
 
 - 3 seeds per model, and the gateway ignores `temperature` for Haiku 5.5, so summaries vary run to run.
@@ -97,6 +131,9 @@ Full table: `python3 bench/compare.py results/model-haiku.json results/gw-full-*
   runs), which favours a head + tail cap by construction.
 - Retention is exact substring match over the whole kept context, against every detail ever
   introduced, so long sessions score low by design.
+- The rerun after the fix covers five of six summarizers (kimi-k2.6 skipped for cost) and reaches
+  the open-weight models through the gateway rather than DigitalOcean, so their exact-retention
+  numbers are less comparable than their false-claim counts.
 - False-success claims were counted with a line-level regex over the checkpoint texts (negations
   and lines that also mention a failure are excluded); flagged lines were spot-checked by hand.
 
