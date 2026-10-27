@@ -14,7 +14,7 @@
 // Machine name: INSTABOX_MACHINE (default eve-tokyo). Template: INSTABOX_TEMPLATE (default agent-browser). Repo: EVE_TOKYO_REPO.
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 const API = "https://api.instabox.sh";
 const KEY = process.env.INSTABOX_API_KEY;
@@ -63,35 +63,35 @@ async function waitOp(id) {
     if (json.state === "failed") throw new Error(`operation ${id} failed: ${JSON.stringify(json.error)}`);
   }
 }
-async function machine() {
-  const r = await api("GET", `/v1/machines/${NAME}`, { allow404: true });
+async function machine(name = NAME) {
+  const r = await api("GET", `/v1/machines/${name}`, { allow404: true });
   return r.status === 404 ? null : r.json;
 }
-async function ensureRunning() {
-  let m = await machine();
+async function ensureRunning(name = NAME) {
+  let m = await machine(name);
   if (!m) {
-    log(`creating machine ${NAME} (${TEMPLATE} template)`);
+    log(`creating machine ${name} (${TEMPLATE} template)`);
     const { json: op } = await api("POST", "/v1/machines", {
-      body: { name: NAME, templateId: TEMPLATE, autoSuspendAfterSeconds: 1800, metadata: { project: "eve-tokyo" } },
+      body: { name, templateId: TEMPLATE, autoSuspendAfterSeconds: 1800, metadata: { project: "eve-tokyo" } },
       headers: idem(),
     });
     await waitOp(op.id);
-    m = await machine();
+    m = await machine(name);
   } else if (m.state === "suspended" || m.state === "stopped") {
     const verb = m.state === "suspended" ? "resume" : "start";
-    log(`${verb} machine ${NAME}`);
+    log(`${verb} machine ${name}`);
     const { json: op } = await api("POST", `/v1/machines/${m.id}/${verb}`, { headers: idem() });
     await waitOp(op.id);
-    m = await machine();
+    m = await machine(name);
   } else if (m.operationId) {
     await waitOp(m.operationId);
-    m = await machine();
+    m = await machine(name);
   }
   for (let i = 0; m.state !== "running" && i < 40; i += 1) {
     await new Promise((r) => setTimeout(r, 5_000));
-    m = await machine();
+    m = await machine(name);
   }
-  if (m.state !== "running") throw new Error(`machine ${NAME} is ${m.state}`);
+  if (m.state !== "running") throw new Error(`machine ${name} is ${m.state}`);
   return m;
 }
 async function exec(id, shell, { envs, timeoutSeconds = 120, cwd } = {}) {
@@ -269,4 +269,6 @@ async function main() {
   }
   fail(`unknown command ${cmd}`);
 }
-main().catch((e) => fail(e.stack ?? String(e)));
+export { api, waitOp, idem, machine, ensureRunning, exec, upload, download, startJob, waitJob, background, withRetry, PATH_PREFIX, HOME, NAME, log };
+// Importable by bench/overnight.mjs; the CLI runs only when this file is the entry point.
+if (import.meta.url === pathToFileURL(process.argv[1]).href) main().catch((e) => fail(e.stack ?? String(e)));
