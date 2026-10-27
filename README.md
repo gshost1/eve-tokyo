@@ -1,6 +1,30 @@
 # eve-tokyo
 
-Compaction drift benchmark for [eve](https://github.com/vercel/eve) agents.
+Benchmarks and long-run tests for [eve](https://github.com/vercel/eve) agents, built on eve's own code.
+
+- [Compaction drift benchmark](#compaction-drift-benchmark): replays long coding sessions through
+  eve's real compaction engine and scores which exact details survive each round.
+- [Long-run sessions](#long-run-sessions): drives real multi-hour eve sessions on coding tasks,
+  records every event, model call and compaction, then checks the agent's work.
+
+## Contributed upstream
+
+- [vercel/eve#4769](https://github.com/vercel/eve/issues/4769): an already-capped tool result is
+  capped again at every later compaction, so its content shrinks each round (400-line grep:
+  60 → 48 → 35 paths visible). The eve team confirmed it and had a fix up within hours:
+  [vercel/eve#4771](https://github.com/vercel/eve/pull/4771).
+  Repro: [gshost1/eve-recap-repro](https://github.com/gshost1/eve-recap-repro).
+- [vercel/eve#4772](https://github.com/vercel/eve/issues/4772): proposes keeping the start and
+  the end of a capped result. eve's `bash` tool already keeps the end of output because that's
+  where errors appear; compaction can follow the same idea so test failures, compiler errors and
+  `exitCode` survive.
+- [vercel/eve#5350](https://github.com/vercel/eve/issues/5350): when the compaction summary call
+  inside a turn fails (a 429 from the summarizer's provider), the whole session ends instead of
+  just that turn. Seen in [long-run sessions](#long-run-sessions); the eve team confirmed it and has a
+  fix up: [vercel/eve#5355](https://github.com/vercel/eve/pull/5355).
+  Repro: [gshost1/eve-turnstep-escape-repro](https://github.com/gshost1/eve-turnstep-escape-repro).
+
+## Compaction drift benchmark
 
 eve's compaction is a thoughtful design: it trims old tool output before ever calling a
 model, so most compactions are fast and free, and it only writes a summary when trimming isn't
@@ -10,7 +34,7 @@ eve's real compaction engine, compacts them repeatedly, and scores which exact d
 (file paths, error strings, commands, decisions) are still in context after each round,
 alongside context reduction, cost and latency.
 
-## Results
+### Results
 
 **The biggest easy win: keep the end of each trimmed tool output, not just the start.**
 Every build and test run in these sessions failed, and the failure was always at the end of
@@ -25,18 +49,6 @@ Measured against eve at [`0fd4240`](https://github.com/vercel/eve/commit/0fd4240
 `deepseek-v4.1-flash`, `qwen3.8-max` and `kimi-k2.6` via DigitalOcean inference.
 The rerun after the fix ([below](#after-the-fix)) used eve at `a3654ef` and the same models through the
 gateway (the DigitalOcean three as `deepseek/deepseek-v4.1-flash`, `alibaba/qwen3.8-max`, `moonshotai/kimi-k2.6`).
-
-### Contributed upstream
-
-- [vercel/eve#4769](https://github.com/vercel/eve/issues/4769): an already-capped tool result is
-  capped again at every later compaction, so its content shrinks each round (400-line grep:
-  60 → 48 → 35 paths visible). The eve team confirmed it and had a fix up within hours:
-  [vercel/eve#4771](https://github.com/vercel/eve/pull/4771).
-  Repro: [gshost1/eve-recap-repro](https://github.com/gshost1/eve-recap-repro).
-- [vercel/eve#4772](https://github.com/vercel/eve/issues/4772): proposes keeping the start and
-  the end of a capped result. eve's `bash` tool already keeps the end of output because that's
-  where errors appear; compaction can follow the same idea so test failures, compiler errors and
-  `exitCode` survive.
 
 ### Cap path (no model)
 
@@ -137,7 +149,7 @@ out of 15 per cell:
 - False-success claims were counted with a line-level regex over the checkpoint texts (negations
   and lines that also mention a failure are excluded); flagged lines were spot-checked by hand.
 
-## Strategies
+### Strategies
 
 | Name | Change to eve's engine |
 |---|---|
@@ -149,7 +161,7 @@ out of 15 per cell:
 Each is a small patch in [`bench/patches/`](bench/patches) applied to a copy of eve's real
 `engine.ts` / `prompt.ts`; everything else is eve's own code.
 
-## Run it
+### Run it
 
 Needs Node 24+ and pnpm.
 
@@ -175,6 +187,37 @@ or relay), `do` (DigitalOcean inference; needs `DO_KEY`). `bench/run-gw.sh` runs
 model layer on an [InstaBox](https://instabox.sh) machine over its API. Other knobs: `BENCH_SEEDS`,
 `BENCH_TURNS`, `BENCH_SUMMARY_ROUNDS`, `BENCH_MAX_ROUNDS`, `BENCH_STRATEGIES`, `BENCH_THRESHOLD`,
 `BENCH_CONCURRENCY`.
+
+## Long-run sessions
+
+[`bench/longrun`](bench/longrun) is an eve app (eve 0.83.2) with a sandboxed coding agent, plus a
+driver. [`drive.mjs`](bench/longrun/drive.mjs) starts a headless `eve dev` for one task, opens a
+session with the task prompt, answers any human-input request, and sends continue prompts until the
+agent reports the task complete or a turn, budget or time limit is hit. It then asks recall probes
+and runs the task's checks inside the sandbox container.
+
+Tasks live in [`tasks.mjs`](bench/longrun/tasks.mjs): changes to real repositories (commander,
+js-yaml) and a from-scratch CLI built feature by feature (`taskr-48`, 48 features in three stages).
+Staged tasks add a rule and more work with each new message, so the rules from the first message
+survive only through compaction. Each task ends with checkable rules: the base commit hash quoted in
+the notes, a `[step]` prefix on every commit, files that must not change, allowed dependencies and a
+fixed report layout.
+
+A run directory holds `stream.jsonl` (client events), `transcript.md`, `probes.json`,
+`verify.json`, `summary.json`, `server.log` and `log/` (every model call, context dumps, tool calls
+and hook events).
+
+```bash
+cd bench/longrun && npm install && cd ../..
+node bench/longrun/drive.mjs mock --model mock --sandbox just-bash   # offline: scripted model, no key, no Docker
+node bench/longrun/drive.mjs taskr-48 --window 400000 --model <gateway model id>
+```
+
+`--window` sets the context window, `--threshold` the compaction point, and `--budget` / `--hours`
+cap a run. Real models go through Vercel AI Gateway (`AI_GATEWAY_API_KEY`, optional
+`AI_GATEWAY_BASE_URL`, `--provider` to pin one provider). The default sandbox is Docker
+(`node:24-bookworm`). [`bench/overnight.mjs`](bench/overnight.mjs) runs several tasks in parallel on
+[InstaBox](https://instabox.sh) machines and fetches the results.
 
 ## Credits
 
