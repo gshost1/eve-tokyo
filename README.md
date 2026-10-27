@@ -20,8 +20,8 @@ Benchmarks and long-run tests for [eve](https://github.com/vercel/eve) agents, b
   `exitCode` survive.
 - [vercel/eve#5350](https://github.com/vercel/eve/issues/5350): when the compaction summary call
   inside a turn fails (a 429 from the summarizer's provider), the whole session ends instead of
-  just that turn. Seen in [long-run sessions](#long-run-sessions); the eve team confirmed it and has a
-  fix up: [vercel/eve#5355](https://github.com/vercel/eve/pull/5355).
+  just that turn. Seen in [long-run sessions](#long-run-sessions); the eve team confirmed it and merged
+  the fix on 2026-10-27: [vercel/eve#5355](https://github.com/vercel/eve/pull/5355).
   Repro: [gshost1/eve-turnstep-escape-repro](https://github.com/gshost1/eve-turnstep-escape-repro).
 
 ## Compaction drift benchmark
