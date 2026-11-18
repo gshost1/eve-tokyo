@@ -23,6 +23,11 @@ Benchmarks and long-run tests for [eve](https://github.com/vercel/eve) agents, b
   just that turn. Seen in [long-run sessions](#long-run-sessions); the eve team confirmed it and merged
   the fix on 2026-10-27: [vercel/eve#5355](https://github.com/vercel/eve/pull/5355).
   Repro: [gshost1/eve-turnstep-escape-repro](https://github.com/gshost1/eve-turnstep-escape-repro).
+- [vercel/eve#5386](https://github.com/vercel/eve/issues/5386): after a mid-step crash, `eve dev --resume`
+  and `eve start` stayed frozen for ~14 minutes waiting out the dead process's inline ownership lease.
+  Confirmed by the eve team; fixed via [vercel/eve#5873](https://github.com/vercel/eve/pull/5873) and
+  [vercel/eve#6561](https://github.com/vercel/eve/pull/6561).
+  Repro: [gshost1/eve-resume-freeze-repro](https://github.com/gshost1/eve-resume-freeze-repro).
 
 ## Compaction drift benchmark
 
